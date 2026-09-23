@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Calendar Alarm Privacy</string>
+    <string name="notification_channel_name">Calendar alarms</string>
+    <string name="notification_channel_description">Audible alarms created from selected calendar events.</string>
+    <string name="alarm_notification_title">Calendar alarm</string>
+    <string name="alarm_notification_stop">Stop alarm</string>
+    <string name="alarm_notification_content">An event alarm is ringing.</string>
+</resources>
