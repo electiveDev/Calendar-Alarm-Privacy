@@ -5,6 +5,17 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+val releaseKeystoreFile = providers.environmentVariable("ANDROID_KEYSTORE_FILE").orNull
+val releaseKeystorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+val hasStableReleaseSigning = listOf(
+    releaseKeystoreFile,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() } && file(releaseKeystoreFile.orEmpty()).isFile
+
 android {
     namespace = "de.calendaralarm.privacy"
     compileSdk = 36
@@ -19,6 +30,17 @@ android {
         vectorDrawables { useSupportLibrary = true }
     }
 
+    signingConfigs {
+        if (hasStableReleaseSigning) {
+            create("stableRelease") {
+                storeFile = file(releaseKeystoreFile!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -26,6 +48,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (hasStableReleaseSigning) {
+                signingConfig = signingConfigs.getByName("stableRelease")
+            }
         }
     }
 
@@ -42,6 +67,30 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+}
+
+tasks.register("verifyReleaseSigning") {
+    doLast {
+        val missing = buildList {
+            if (releaseKeystoreFile.isNullOrBlank()) add("ANDROID_KEYSTORE_FILE")
+            if (releaseKeystorePassword.isNullOrBlank()) add("ANDROID_KEYSTORE_PASSWORD")
+            if (releaseKeyAlias.isNullOrBlank()) add("ANDROID_KEY_ALIAS")
+            if (releaseKeyPassword.isNullOrBlank()) add("ANDROID_KEY_PASSWORD")
+            if (!releaseKeystoreFile.isNullOrBlank() && !file(releaseKeystoreFile!!).isFile) {
+                add("keystore file at $releaseKeystoreFile")
+            }
+        }
+        check(missing.isEmpty()) {
+            "Stable release signing is not configured. Missing: ${missing.joinToString()}. " +
+                "Configure the GitHub Actions signing secrets before building a release APK."
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "assembleRelease") {
+        dependsOn("verifyReleaseSigning")
     }
 }
 
