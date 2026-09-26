@@ -1,8 +1,6 @@
 package de.calendaralarm.privacy.ui.onboarding
 
 import android.Manifest
-import android.app.AlarmManager
-import android.app.NotificationManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -52,13 +50,51 @@ fun OnboardingScreen(app: CalendarAlarmApplication, onComplete: () -> Unit) {
     var step by rememberSaveable { mutableIntStateOf(0) }
     var calendars by remember { mutableStateOf<List<CalendarInfo>>(emptyList()) }
     var selected by remember { mutableStateOf<Set<Long>>(emptySet()) }
-    val calendarPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    var hasCalendarPermission by remember { mutableStateOf(app.calendarReader.hasReadPermission()) }
+    var calendarPermissionDenied by remember { mutableStateOf(false) }
+
+    suspend fun refreshCalendars(): List<CalendarInfo> {
+        hasCalendarPermission = app.calendarReader.hasReadPermission()
+        val available = withContext(Dispatchers.IO) { app.calendarReader.readCalendars() }
+        calendars = available
+        return available
+    }
+
+    val calendarPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        scope.launch {
+            refreshCalendars()
+            hasCalendarPermission = app.calendarReader.hasReadPermission()
+            if (granted && hasCalendarPermission) {
+                calendarPermissionDenied = false
+                if (step == 0) step = 1
+            } else {
+                calendarPermissionDenied = true
+            }
+        }
+    }
+    val appSettings = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        scope.launch {
+            refreshCalendars()
+            if (hasCalendarPermission) {
+                calendarPermissionDenied = false
+                if (step == 0) step = 1
+            }
+        }
+    }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     LaunchedEffect(Unit) {
         val settings = app.preferences.settings.first()
         selected = settings.selectedCalendarIds
-        calendars = withContext(Dispatchers.IO) { app.calendarReader.readCalendars() }
+        refreshCalendars()
+    }
+
+    LaunchedEffect(step) {
+        if (step == 5) {
+            val available = refreshCalendars()
+            val availableIds = available.mapTo(mutableSetOf()) { it.id }
+            selected = selected.intersect(availableIds)
+        }
     }
 
     Scaffold { padding ->
@@ -71,9 +107,21 @@ fun OnboardingScreen(app: CalendarAlarmApplication, onComplete: () -> Unit) {
             when (step) {
                 0 -> PermissionStep(
                     title = "Calendar access",
-                    body = "Calendar Alarm Privacy reads events stored on this device so it can create alarms. Calendar access is read-only. Nothing is uploaded.",
-                    button = "Allow calendar access",
-                    onAction = { calendarPermission.launch(Manifest.permission.READ_CALENDAR); step = 1 },
+                    body = if (calendarPermissionDenied) {
+                        "Calendar access was not granted. The app needs read-only access to find events and schedule alarms."
+                    } else {
+                        "Calendar Alarm Privacy reads events stored on this device so it can create alarms. Calendar access is read-only. Nothing is uploaded."
+                    },
+                    button = if (calendarPermissionDenied) "Try calendar access again" else "Allow calendar access",
+                    onAction = { calendarPermission.launch(Manifest.permission.READ_CALENDAR) },
+                    secondary = if (calendarPermissionDenied) "Open app settings" else null,
+                    onSecondary = if (calendarPermissionDenied) {
+                        {
+                            appSettings.launch(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")),
+                            )
+                        }
+                    } else null,
                 )
                 1 -> PermissionStep(
                     title = "Notifications",
@@ -114,7 +162,14 @@ fun OnboardingScreen(app: CalendarAlarmApplication, onComplete: () -> Unit) {
                     onAction = { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)); step = 5 },
                     onSecondary = { step = 5 },
                 )
-                5 -> CalendarSelectionStep(calendars, selected) { selected = it }
+                5 -> CalendarSelectionStep(
+                    calendars = calendars,
+                    selected = selected,
+                    hasCalendarPermission = hasCalendarPermission,
+                    onChanged = { selected = it },
+                    onRequestPermission = { calendarPermission.launch(Manifest.permission.READ_CALENDAR) },
+                    onRefresh = { scope.launch { refreshCalendars() } },
+                )
                 else -> TestAlarmStep(
                     selectedCount = selected.size,
                     onTest = { scope.launch { app.alarmScheduler.scheduleTest(app.preferences.settings.first()) } },
@@ -130,7 +185,7 @@ fun OnboardingScreen(app: CalendarAlarmApplication, onComplete: () -> Unit) {
             if (step == 5) {
                 Button(
                     onClick = { step = 6 },
-                    enabled = selected.isNotEmpty(),
+                    enabled = hasCalendarPermission && selected.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Continue") }
             }
@@ -158,12 +213,32 @@ private fun PermissionStep(
 }
 
 @Composable
-private fun CalendarSelectionStep(calendars: List<CalendarInfo>, selected: Set<Long>, onChanged: (Set<Long>) -> Unit) {
+private fun CalendarSelectionStep(
+    calendars: List<CalendarInfo>,
+    selected: Set<Long>,
+    hasCalendarPermission: Boolean,
+    onChanged: (Set<Long>) -> Unit,
+    onRequestPermission: () -> Unit,
+    onRefresh: () -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Choose calendars", style = MaterialTheme.typography.headlineSmall)
         Text("Only selected calendars are used to schedule alarms. Calendar data remains on this device.")
         if (calendars.isEmpty()) {
-            Card { Text("No visible calendars were found. Grant calendar access and return here.", Modifier.padding(16.dp)) }
+            Card {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        if (hasCalendarPermission) {
+                            "No visible calendars were found. Check that a calendar is available and synchronized on this device."
+                        } else {
+                            "Calendar permission is required before calendars can be listed."
+                        },
+                    )
+                    OutlinedButton(onClick = if (hasCalendarPermission) onRefresh else onRequestPermission) {
+                        Text(if (hasCalendarPermission) "Refresh calendars" else "Grant calendar access")
+                    }
+                }
+            }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 items(calendars, key = { it.id }) { calendar ->

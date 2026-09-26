@@ -31,7 +31,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +38,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import de.calendaralarm.privacy.CalendarAlarmApplication
 import de.calendaralarm.privacy.data.calendar.CalendarInfo
 import de.calendaralarm.privacy.data.prefs.AppSettings
@@ -51,7 +51,7 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(app: CalendarAlarmApplication, onBack: () -> Unit) {
-    val settings by app.preferences.settings.collectAsState(initial = AppSettings())
+    val settings by app.preferences.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
     val scope = rememberCoroutineScope()
     var calendars by remember { mutableStateOf<List<CalendarInfo>>(emptyList()) }
     val ringtonePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -122,7 +122,15 @@ fun SettingsScreen(app: CalendarAlarmApplication, onBack: () -> Unit) {
                 )
             }
             item {
-                ToggleSetting("Skip all-day events", settings.skipAllDay) { checked -> resync { app.preferences.setSkipAllDay(checked) } }
+                Column {
+                    ToggleSetting("Skip all-day events", settings.skipAllDay) { checked -> resync { app.preferences.setSkipAllDay(checked) } }
+                    if (!settings.skipAllDay) {
+                        Text(
+                            "All-day events use their calendar start time, which is often midnight. Set this only if that alarm time is intended.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
                 ToggleSetting("Skip declined events", settings.skipDeclined) { checked -> resync { app.preferences.setSkipDeclined(checked) } }
             }
             item {

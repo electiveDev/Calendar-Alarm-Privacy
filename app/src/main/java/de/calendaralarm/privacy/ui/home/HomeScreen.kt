@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -14,6 +15,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -24,19 +26,28 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import de.calendaralarm.privacy.data.db.ScheduledAlarm
+import de.calendaralarm.privacy.domain.CalendarSyncResult
+import de.calendaralarm.privacy.domain.SyncBlocker
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 
 private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+private val dateFormatter = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
+private val syncTimeFormatter = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -44,9 +55,21 @@ fun HomeScreen(
     viewModel: HomeViewModel,
     onOpenSettings: () -> Unit,
 ) {
-    val alarms by viewModel.alarms.collectAsStateWithLifecycleCompat()
-    val reliability by viewModel.reliability.collectAsStateWithLifecycleCompat()
-    val calendarNames by viewModel.calendarNames.collectAsStateWithLifecycleCompat()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val alarms by viewModel.alarms.collectAsStateWithLifecycle()
+    val reliability by viewModel.reliability.collectAsStateWithLifecycle()
+    val calendarNames by viewModel.calendarNames.collectAsStateWithLifecycle()
+    val syncState by viewModel.syncState.collectAsStateWithLifecycle()
+
+    DisposableEffect(lifecycleOwner, viewModel) {
+        viewModel.refresh()
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -68,6 +91,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item { ReliabilityCard(reliability) }
+            item { CalendarSyncCard(syncState.isRefreshing, syncState.failed, syncState.result) }
             item { Text("Upcoming alarms", style = MaterialTheme.typography.headlineSmall) }
             if (alarms.isEmpty()) {
                 item { Text("No upcoming alarms.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -77,6 +101,53 @@ fun HomeScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CalendarSyncCard(isRefreshing: Boolean, failed: Boolean, result: CalendarSyncResult?) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Calendar sync", style = MaterialTheme.typography.titleLarge)
+                if (isRefreshing) CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            }
+
+            when {
+                isRefreshing && result == null -> Text("Checking calendar access and upcoming events…")
+                failed -> Text("Calendar sync failed. Tap Refresh to try again.")
+                result?.blocker == SyncBlocker.CALENDAR_PERMISSION -> Text("Calendar access is off. Grant calendar permission to read events.")
+                result?.blocker == SyncBlocker.EXACT_ALARM_PERMISSION -> Text("Exact alarm access is off. Allow alarms and reminders in Android settings.")
+                result?.blocker == SyncBlocker.NO_SELECTED_CALENDARS -> Text("No calendars are selected. Choose a calendar in Settings.")
+                result != null -> SyncSummary(result)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SyncSummary(result: CalendarSyncResult) {
+    val completedAt = Instant.ofEpochMilli(result.completedAtUtc)
+        .atZone(ZoneId.systemDefault())
+        .format(syncTimeFormatter)
+    Text("Last checked: $completedAt", style = MaterialTheme.typography.bodySmall)
+    Text("${result.eventsFound} calendar entries found in the next 7 days.")
+    Text("${result.scheduledCount} alarms set${if (result.mutedCount > 0) "; ${result.mutedCount} muted" else ""}.")
+
+    val skipped = buildList {
+        if (result.skippedAllDay > 0) add("${result.skippedAllDay} all-day")
+        if (result.skippedDeclined > 0) add("${result.skippedDeclined} declined")
+        if (result.skippedOtherCalendars > 0) add("${result.skippedOtherCalendars} from unselected calendars")
+        if (result.skippedPastOrTooLate > 0) add("${result.skippedPastOrTooLate} already started or too late")
+    }
+    if (skipped.isNotEmpty()) {
+        Text("Skipped: ${skipped.joinToString()}.", style = MaterialTheme.typography.bodySmall)
+    }
+    if (result.scheduleFailures > 0) {
+        Text("${result.scheduleFailures} alarms could not be set. Check exact alarm access and refresh.", color = MaterialTheme.colorScheme.error)
+    }
+    if (result.eventsFound == 0) {
+        Text("Android Calendar returned no entries in the next 7 days.", style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -126,6 +197,7 @@ private fun AlarmCard(alarm: ScheduledAlarm, calendarName: String, onMutedChange
                     modifier = Modifier.semantics { contentDescription = "Alarm enabled" },
                 )
             }
+            Text(start.format(dateFormatter), style = MaterialTheme.typography.bodyMedium)
             Text(alarm.eventTitle.orEmpty().ifBlank { "Calendar event" }, style = MaterialTheme.typography.titleMedium)
             Text("Alarm: ${Instant.ofEpochMilli(alarm.alarmFireUtc).atZone(ZoneId.systemDefault()).format(timeFormatter)}")
             Text("Calendar: $calendarName", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -133,7 +205,3 @@ private fun AlarmCard(alarm: ScheduledAlarm, calendarName: String, onMutedChange
         }
     }
 }
-
-@Composable
-private fun <T> kotlinx.coroutines.flow.StateFlow<T>.collectAsStateWithLifecycleCompat(): androidx.compose.runtime.State<T> =
-    collectAsState()
